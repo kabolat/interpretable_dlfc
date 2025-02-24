@@ -1,0 +1,27 @@
+function mfparams = visualizeFCM(z, C, U)
+
+z = stripdims(z);
+z = gather(extractdata(z));
+z = squeeze(z)';
+
+maxZ = max(z);
+minZ = min(z);
+
+[numClst,dims] = size(C);
+
+mfparams = zeros(numClst,dims,2);
+
+for ii = 1:dims
+    subplot(dims,1,ii)
+    hold on
+    for jj = 1:numClst
+        stem(z(:,ii)',U(jj,:))
+        sigma = invgaussmf4sigma(z(:,ii), U(jj,:)', C(jj,ii));
+        mfparams(jj,ii,:) = [sigma, C(jj,ii)];
+        plot(linspace(minZ,maxZ,1000)
+    end
+    hold off
+end
+
+
+end

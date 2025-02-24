@@ -1,0 +1,147 @@
+clc; close all; clear all;
+
+%%
+trainImagesFile = '/home/kutaybolat/Dropbox/4GPU/MATLAB/Fuzzy/MNIST/train-images.idx3-ubyte';
+trainLabelsFile = '/home/kutaybolat/Dropbox/4GPU/MATLAB/Fuzzy/MNIST/train-labels.idx1-ubyte';
+testImagesFile = '/home/kutaybolat/Dropbox/4GPU/MATLAB/Fuzzy/MNIST/t10k-images.idx3-ubyte';
+testLabelsFile = '/home/kutaybolat/Dropbox/4GPU/MATLAB/Fuzzy/MNIST/t10k-labels.idx1-ubyte';
+
+XTrain = processMNISTimages(trainImagesFile);
+numTrainImages = size(XTrain,4);
+YTrain = processMNISTlabels(trainLabelsFile);
+XTest = processMNISTimages(testImagesFile);
+YTest = processMNISTlabels(testLabelsFile);
+
+%%
+latentDim = 3;
+imageSize = [28 28 1];
+
+encoderLG = layerGraph([
+    imageInputLayer(imageSize,'Name','input_encoder','Normalization','none')
+    convolution2dLayer(3, 32, 'Padding','same', 'Stride', 2, 'Name', 'conv1')
+    reluLayer('Name','relu1')
+    convolution2dLayer(3, 64, 'Padding','same', 'Stride', 2, 'Name', 'conv2')
+    reluLayer('Name','relu2')
+    fullyConnectedLayer(2 * latentDim, 'Name', 'fc_encoder')
+    ]);
+
+decoderLG = layerGraph([
+    imageInputLayer([1 1 latentDim],'Name','i','Normalization','none')
+    transposedConv2dLayer(7, 64, 'Cropping', 'same', 'Stride', 7, 'Name', 'transpose1')
+    reluLayer('Name','relu1')
+    transposedConv2dLayer(3, 64, 'Cropping', 'same', 'Stride', 2, 'Name', 'transpose2')
+    reluLayer('Name','relu2')
+    transposedConv2dLayer(3, 32, 'Cropping', 'same', 'Stride', 2, 'Name', 'transpose3')
+    reluLayer('Name','relu3')
+    transposedConv2dLayer(3, 1, 'Cropping', 'same', 'Name', 'transpose4')
+    ]);
+
+encoderNet = dlnetwork(encoderLG);
+decoderNet = dlnetwork(decoderLG);
+
+%%
+lossGraph = figure;
+reconst = figure;
+randLatent = figure;
+
+%%
+numEpochs = 50;
+miniBatchSize = 500;
+lr = 1e-3;      %Learning Rate
+numIterations = floor(numTrainImages/miniBatchSize);
+iteration = 0;
+
+avgGradientsEncoder = [];
+avgGradientsSquaredEncoder = [];
+avgGradientsDecoder = [];
+avgGradientsSquaredDecoder = [];
+
+XPredEpch = zeros(28,28*10,numEpochs);
+
+itx = 1:numEpochs*numIterations;
+elbo_arr = 0*itx; rLoss_arr = 0*itx; KL_arr = 0*itx;
+acc = 1;
+
+XTrain_dl = dlarray(single(XTrain), 'SSCB');
+for epoch = 1:numEpochs
+    tic;      
+
+    for i = 1:numIterations
+        iteration = iteration + 1;
+        idx = (i-1)*miniBatchSize+1:i*miniBatchSize; %%Datanin basindan sirayla aliyor
+        XBatch = XTrain(:,:,:,idx);
+        YBatch = YTrain(idx);
+        XBatch = dlarray(single(XBatch), 'SSCB');
+        
+        XBatch = gpuArray(XBatch);
+        
+        %%Gradyan Hesabi
+        [infGrad, genGrad] = dlfeval(...
+            @modelGradients, encoderNet, decoderNet, XBatch);
+        
+        
+        %%Adam
+        [decoderNet.Learnables, avgGradientsDecoder, avgGradientsSquaredDecoder] = ...
+            adamupdate(decoderNet.Learnables, ...
+            genGrad, avgGradientsDecoder, avgGradientsSquaredDecoder, iteration, lr);
+        [encoderNet.Learnables, avgGradientsEncoder, avgGradientsSquaredEncoder] = ...
+            adamupdate(encoderNet.Learnables, ...
+            infGrad, avgGradientsEncoder, avgGradientsSquaredEncoder, iteration, lr);
+        
+        %%Iteration Visualization
+        [z, zMean, zLogvar] = sampling(encoderNet, XBatch);
+        xPred = sigmoid(forward(decoderNet, z));
+        [elbo, rLoss, KL] = ELBOloss(XBatch, xPred, zMean, zLogvar);
+        elbo_arr(acc) = squeeze(gather(extractdata(elbo)));
+        rLoss_arr(acc)= squeeze(gather(extractdata(rLoss)));
+        KL_arr(acc)   = squeeze(gather(extractdata(KL)));
+        
+        figure(lossGraph)
+        title("Training Process for Epoch "+epoch)
+        subplot 311
+        ylabel("ELBO Loss")
+        plot(itx,elbo_arr,'-k','LineWidth',2)
+        ylim([0 2*median(elbo_arr(1:acc))])
+        xlim([0 acc])
+        subplot 312
+        ylabel("Reconstruction Loss")
+        plot(itx,rLoss_arr,'-r','LineWidth',2)
+        ylim([0 2*median(rLoss_arr(1:acc))])
+        xlim([0 acc])
+        subplot 313
+        ylabel('KL Divergence Loss')
+        xlabel('Iteration')
+        plot(itx,KL_arr,'-b','LineWidth',2)
+        ylim([0 2*median(KL_arr(1:acc))])
+        xlim([0 acc])
+        
+        acc = acc+1;
+    end
+    elapsedTime = toc;
+    
+    disp("Epoch : "+epoch+" Test ELBO loss = "+gather(extractdata(elbo))+...
+        ". Time taken for epoch = "+ elapsedTime + "s")
+    
+    %%Epoch Visualization
+    %%Reconstruction
+    figure(reconst)
+    title("Reconstructed Images for Epoch "+epoch)
+    XPredEpch(:,:,epoch) = visualizeReconstruction(XTrain_dl, YTrain, encoderNet, decoderNet);
+    drawnow
+    
+    %%Sampled Latent Space
+    figure(randLatent)
+    title("Randomly Sampled Latent Space for Epoch "+epoch)
+    visualizeLatentSpace(XTrain_dl, YTrain_dl, encoderNet)
+    drawnow
+    
+    %%
+    
+end
+
+ 
+
+%%
+visualizeLatentSpaceMeanVar(XTrain, YTrain, encoderNet)
+visualizeLatentSpaceMeanVar(XTest, YTest, encoderNet)
+generate(decoderNet, latentDim)
